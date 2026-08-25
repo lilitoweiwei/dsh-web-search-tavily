@@ -36,7 +36,7 @@ export const inject = ['web']
  * directly and defaulted here.
  */
 export async function apply(ctx, config) {
-  const resolved = { ...config }
+  const resolved = { ...(config ?? {}) }
   // Primary: the credentials service's TAVILY_API_KEY (owner-only local file).
   const credentials = ctx.get('credentials')
   if (credentials !== undefined) {
@@ -51,7 +51,7 @@ export async function apply(ctx, config) {
     }
   }
   // Fallback: config.apiKey (intended only when no credential is configured).
-  resolved.apiKey = resolved.apiKey ?? config.apiKey ?? ''
+  resolved.apiKey = resolved.apiKey ?? config?.apiKey ?? ''
   resolved.baseURL = resolved.baseURL ?? TAVILY_DEFAULT_BASE_URL
   resolved.searchDepth = resolved.searchDepth ?? TAVILY_DEFAULT_SEARCH_DEPTH
   resolved.chunksPerSource = resolved.chunksPerSource ?? TAVILY_DEFAULT_CHUNKS_PER_SOURCE
