@@ -32,12 +32,23 @@ auto-select when it is the only usable provider).
 
 ## API key resolution
 
+Resolved **lazily, per search** — never at plugin load. The loader inits
+plugin entries in parallel, so the `credentials` service may not be ready when
+this plugin's `apply` runs; a load-time probe would silently lose the key and
+leave the provider permanently unavailable. A per-search read also picks up
+rotated keys without a restart.
+
 Order of precedence:
 
 1. **`credentials` service** — `TAVILY_API_KEY` in `~/.dsh/.credentials.yaml`
    (recommended; owner-only file, key never enters `cordis.yml` or Git).
 2. **`config.apiKey`** — fallback field in the plugin's cordis config (use only
    when a shared/managed environment makes this acceptable).
+3. **`TAVILY_API_KEY` environment variable** — last-resort ambient fallback.
+
+A search that ends with no key fails as a provider error with a remediation
+hint; `available()` accepts the lazy source itself, so the seam never rejects
+this provider just because the key store is not ready.
 
 ## Config
 

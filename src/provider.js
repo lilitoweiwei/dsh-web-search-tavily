@@ -7,6 +7,12 @@
  * omitted: the provider only sends `include_answer` when requested, so by
  * default Tavily returns no answer and inventing one would lie.
  *
+ * The API key is NOT baked at construction. `apiKey` holds a literal at load
+ * time (config-provided); `resolveApiKey` is a lazy per-search source that
+ * reads the credentials store when each search runs. `available()` accepts
+ * either source so the seam never refuses a provider merely because the
+ * credentials service is not ready yet during parallel plugin init.
+ *
  * @module @lilitoweiwei/dsh-web-search-tavily/provider
  */
 
@@ -54,9 +60,10 @@ export class TavilySearchProvider {
 
   /** Cheap local usability check; never makes network calls. */
   available() {
-    const { apiKey, baseURL, searchDepth, chunksPerSource, maxResults } = this.options
-    return typeof apiKey === 'string'
-      && apiKey.length > 0
+    const { apiKey, resolveApiKey, baseURL, searchDepth, chunksPerSource, maxResults } = this.options
+    const hasKeySource = (typeof apiKey === 'string' && apiKey.length > 0)
+      || resolveApiKey !== undefined
+    return hasKeySource
       && URL.canParse(baseURL)
       && SEARCH_DEPTHS.has(searchDepth)
       && isPositiveInteger(chunksPerSource)
@@ -65,14 +72,18 @@ export class TavilySearchProvider {
 
   /**
    * Run one Tavily search, mapping the response into seam-normalized sources.
-   * HTTP redirects fail as `WEB_PROVIDER_ERROR` (no credential forwarding);
-   * cancellation surfaces as `WEB_ABORTED`.
+   * The API key is resolved per search (literal config key first, then the
+   * lazy `resolveApiKey` source); a search without any key fails as
+   * `WEB_PROVIDER_ERROR` with a remediation hint. HTTP redirects fail as
+   * `WEB_PROVIDER_ERROR` (no credential forwarding); cancellation surfaces as
+   * `WEB_ABORTED`.
    *
    * @param {object} request - the seam `WebSearchRequest`.
    * @param {AbortSignal} [signal] - optional cancellation signal forwarded to fetch.
    * @returns {Promise<object>} a `WebSearchResult`.
    */
   async search(request, signal) {
+    const apiKey = await resolveKey(this.options)
     // A per-request bound wins over the configured default; either may be absent.
     const maxResults = request.maxResults ?? this.options.maxResults
     let response
@@ -81,7 +92,7 @@ export class TavilySearchProvider {
         method: 'POST',
         redirect: 'error',
         headers: {
-          'authorization': `Bearer ${this.options.apiKey}`,
+          'authorization': `Bearer ${apiKey}`,
           'content-type': 'application/json',
           'accept': 'application/json',
           'user-agent': USER_AGENT,
@@ -182,4 +193,30 @@ function isAbortError(error) {
 /** True for a positive whole number (a request-limit that can be sent). */
 function isPositiveInteger(value) {
   return Number.isInteger(value) && value > 0
+}
+
+/**
+ * Resolve the API key for one search: a non-empty literal `apiKey` wins, then
+ * the lazy `resolveApiKey` source. A search with neither fails loudly (the
+ * seam never rejects the provider at registration for a missing key, because
+ * the credentials store may not be ready until after plugin init).
+ *
+ * @param {object} options - the provider's resolved options.
+ * @returns {Promise<string>} the key to send.
+ */
+async function resolveKey(options) {
+  if (typeof options.apiKey === 'string' && options.apiKey.length > 0) return options.apiKey
+  let resolved
+  if (options.resolveApiKey !== undefined) {
+    try {
+      resolved = await options.resolveApiKey()
+    } catch (error) {
+      throw new WebError(`Tavily key resolution failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+    }
+  }
+  if (typeof resolved === 'string' && resolved.length > 0) return resolved
+  throw new WebError(
+    'Tavily search requires an API key: set TAVILY_API_KEY in the credentials store (or the plugin config apiKey)',
+    'WEB_PROVIDER_ERROR',
+  )
 }

@@ -56,11 +56,31 @@ assert.equal(
   'a configured key makes the provider available',
 )
 assert.equal(new TavilySearchProvider({ apiKey: 42 }).available(), false, 'non-string key → unavailable')
+// A lazy per-search key source alone must keep the provider available: the
+// seam calls available() before search(), and credentials may not be ready at
+// plugin load, so availability must not depend on a load-time key snapshot.
+assert.equal(
+  new TavilySearchProvider({ resolveApiKey: async () => 'tvly-lazy' }).available(),
+  true,
+  'a lazy key source keeps the provider available without a literal key',
+)
+
+// ── missing key at search time (no network: rejects before any fetch) ──────
+
+await assert.rejects(
+  new TavilySearchProvider({}).search({ query: 'no-key probe' }),
+  (error) => error?.code === 'WEB_PROVIDER_ERROR',
+  'a search without any key source fails as WEB_PROVIDER_ERROR',
+)
 
 // ── live call ──────────────────────────────────────────────────────────────
 
 if (apiKey.length > 0) {
-  const provider = new TavilySearchProvider({ apiKey, maxResults: 3 })
+  // Exercise the lazy path: no literal key, the resolver supplies one per call.
+  const provider = new TavilySearchProvider({
+    resolveApiKey: async () => process.env.TAVILY_API_KEY,
+    maxResults: 3,
+  })
   console.log('live search (provider id=%s, available=%s)…', provider.id, provider.available())
   const result = await provider.search({ query: 'DeepSeek Harness', maxResults: 3 })
   console.log('live result sources: %d, truncated=%s', result.sources.length, result.truncated)
