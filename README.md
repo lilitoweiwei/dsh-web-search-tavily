@@ -41,7 +41,9 @@ Order of precedence:
 
 ## Config
 
-All plugin-config fields are optional; the key should come from credentials.
+No schemastery `Config` schema is declared (matching minimal external plugins);
+config fields are read directly and defaulted in `apply`. All are optional; the
+key should come from credentials.
 
 - `baseURL` — default `https://api.tavily.com`
 - `searchDepth` — `advanced` (default) / `basic` / `fast` / `ultra-fast`

@@ -30,10 +30,11 @@ export const name = 'web-search-tavily'
 /** The web seam this provider registers into. */
 export const inject = ['web']
 
-/** Plugin config. All fields optional. */
-export const Config = {}
-
-/** Register the Tavily search provider with `ctx.web`. */
+/**
+ * Register the Tavily search provider with `ctx.web`. No `Config` schema is
+ * declared (matching minimal external plugins): config fields are read
+ * directly and defaulted here.
+ */
 export async function apply(ctx, config) {
   const resolved = { ...config }
   // Primary: the credentials service's TAVILY_API_KEY (owner-only local file).
