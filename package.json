@@ -1,0 +1,30 @@
+{
+  "name": "@lilitoweiwei/dsh-web-search-tavily",
+  "version": "0.1.0",
+  "description": "Minimal Tavily-backed WebSearchProvider for the DeepSeek Harness web capability seam (ctx.web). Registers a single search provider; key resolved from the 'credentials' service (TAVILY_API_KEY) with config.apiKey as fallback.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./invariant": "./src/invariant.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "test",
+    "README.md"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-web": "^0.1.0"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "tavily",
+    "web-search",
+    "web-search-provider"
+  ]
+}
