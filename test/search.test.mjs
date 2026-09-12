@@ -225,11 +225,14 @@ const oneSource = (url) => ({ status: 200, body: { results: [{ url, title: 'OK' 
   stub.restore()
   assert.equal(failure?.code, 'WEB_PROVIDER_ERROR', 'an all-refused search fails as WEB_PROVIDER_ERROR')
   assert.match(failure.message, /all 2 configured API keys/, 'the message counts the keys tried')
+  assert.match(failure.message, /#1 \([0-9a-f]{12}\) HTTP 432/, 'the message names the refusing key by fingerprint')
+  assert.match(failure.message, new RegExp(`#2 \\(${keyFingerprint('dead-2')}\\) HTTP 401`), 'each key is named in attempt order')
   assert.match(failure.message, /HTTP 432/, 'the message names the exhausted key verdict')
   assert.match(failure.message, /HTTP 401/, 'the message names the unauthorized key verdict')
   assert.match(failure.message, /Last error: Unauthorized/, "the message keeps the API's own wording")
   assert.equal(failure.message.includes('dead-1'), false, 'the message never leaks a key value')
   assert.equal(stub.calls.length, 2, 'each configured key is attempted once')
+  console.log('all-refused message: %s', failure.message)
 }
 
 {

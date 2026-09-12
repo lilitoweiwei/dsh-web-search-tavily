@@ -141,7 +141,7 @@ export class TavilySearchProvider {
       if (outcome.kind === 'failed') throw outcome.error
 
       this.pool.noteRefused(entry.id, outcome)
-      refusals.push({ position: position + 1, ...outcome })
+      refusals.push({ position: position + 1, id: entry.id, ...outcome })
       this.#log('warn', 'key %s %s (HTTP %d); trying key %d of %d',
         entry.id, outcome.reason, outcome.status, position + 2, candidates.length)
     }
