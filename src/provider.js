@@ -7,16 +7,32 @@
  * omitted: the provider only sends `include_answer` when requested, so by
  * default Tavily returns no answer and inventing one would lie.
  *
- * The API key is NOT baked at construction. `apiKey` holds a literal at load
- * time (config-provided); `resolveApiKey` is a lazy per-search source that
- * reads the credentials store when each search runs. `available()` accepts
- * either source so the seam never refuses a provider merely because the
- * credentials service is not ready yet during parallel plugin init.
+ * One search may send more than one request: the keys are interchangeable, so
+ * a key the API refuses for a key-specific reason (exhausted plan quota, a
+ * revoked or invalid key, a rate limit) parks itself and the search moves to
+ * the next key, up to every configured key. Refusals that are not key-specific
+ * — a malformed request, a Tavily-side outage, a transport failure — fail the
+ * search on the first response, because rotating would repeat the same failure
+ * once per key.
+ *
+ * The API keys are NOT baked at construction. `apiKey` holds a literal at load
+ * time (config-provided); `resolveApiKeys` is a lazy per-search source that
+ * reads the credentials store when each search runs, so a rotated or added key
+ * reaches the next search without a restart. `available()` accepts either
+ * source so the seam never refuses a provider merely because the credentials
+ * service is not ready yet during parallel plugin init.
  *
  * @module @lilitoweiwei/dsh-web-search-tavily/provider
  */
 
 import { WebError } from '@deepseek-ai/dsh-web'
+import {
+  TAVILY_DEFAULT_AUTH_COOLDOWN_MS,
+  TAVILY_DEFAULT_QUOTA_COOLDOWN_MS,
+  TAVILY_DEFAULT_RATE_LIMIT_COOLDOWN_MS,
+  TAVILY_MAX_RETRY_AFTER_MS,
+  TavilyKeyPool,
+} from './keys.js'
 
 /** Stable id this provider registers under with `ctx.web`. */
 export const TAVILY_PROVIDER_ID = 'tavily'
@@ -34,10 +50,17 @@ export const TAVILY_DEFAULT_CHUNKS_PER_SOURCE = 3
 export const TAVILY_DEFAULT_MAX_RESULTS = 5
 
 /** Attribution header sent on every request. Bump with the package version. */
-const USER_AGENT = 'dsh-web-search-tavily/0.1.0'
+const USER_AGENT = 'dsh-web-search-tavily/0.2.0'
 
 /** Allowed Tavily `search_depth` values (per official docs). */
 const SEARCH_DEPTHS = new Set(['advanced', 'basic', 'fast', 'ultra-fast'])
+
+/**
+ * Tavily's `432`: the account's plan quota for the current period is used up.
+ * Verified against the live API — the body reads "This request exceeds your
+ * plan's set usage limit."
+ */
+const HTTP_PLAN_LIMIT = 432
 
 /**
  * Resolved provider options (the plugin's `apply` supplies the credentials /
@@ -52,6 +75,8 @@ export class TavilySearchProvider {
       maxResults: options.maxResults ?? TAVILY_DEFAULT_MAX_RESULTS,
       ...options,
     }
+    /** Rotation and quarantine state for the configured keys. */
+    this.pool = new TavilyKeyPool()
   }
 
   get id() {
@@ -60,9 +85,10 @@ export class TavilySearchProvider {
 
   /** Cheap local usability check; never makes network calls. */
   available() {
-    const { apiKey, resolveApiKey, baseURL, searchDepth, chunksPerSource, maxResults } = this.options
+    const { apiKey, resolveApiKey, resolveApiKeys, baseURL, searchDepth, chunksPerSource, maxResults } = this.options
     const hasKeySource = (typeof apiKey === 'string' && apiKey.length > 0)
       || resolveApiKey !== undefined
+      || resolveApiKeys !== undefined
     return hasKeySource
       && URL.canParse(baseURL)
       && SEARCH_DEPTHS.has(searchDepth)
@@ -72,55 +98,212 @@ export class TavilySearchProvider {
 
   /**
    * Run one Tavily search, mapping the response into seam-normalized sources.
-   * The API key is resolved per search (literal config key first, then the
-   * lazy `resolveApiKey` source); a search without any key fails as
-   * `WEB_PROVIDER_ERROR` with a remediation hint. HTTP redirects fail as
+   *
+   * The keys are resolved per search (literal config key first, then the lazy
+   * source) and attempted in rotation order until one answers or every
+   * configured key has refused. A key-specific refusal parks that key and the
+   * next key is tried; the search fails as `WEB_PROVIDER_ERROR` when no key
+   * answers, naming what each key said, and as `WEB_PROVIDER_ERROR` with a
+   * remediation hint when no key is configured at all. HTTP redirects fail as
    * `WEB_PROVIDER_ERROR` (no credential forwarding); cancellation surfaces as
-   * `WEB_ABORTED`.
+   * `WEB_ABORTED` and stops the rotation.
    *
    * @param {object} request - the seam `WebSearchRequest`.
    * @param {AbortSignal} [signal] - optional cancellation signal forwarded to fetch.
    * @returns {Promise<object>} a `WebSearchResult`.
    */
   async search(request, signal) {
-    const apiKey = await resolveKey(this.options)
     // A per-request bound wins over the configured default; either may be absent.
     const maxResults = request.maxResults ?? this.options.maxResults
-    let response
-    try {
-      response = await fetch(`${this.options.baseURL}/search`, {
-        method: 'POST',
-        redirect: 'error',
-        headers: {
-          'authorization': `Bearer ${apiKey}`,
-          'content-type': 'application/json',
-          'accept': 'application/json',
-          'user-agent': USER_AGENT,
-        },
-        body: JSON.stringify({
-          query: request.query,
-          search_depth: this.options.searchDepth,
-          chunks_per_source: this.options.chunksPerSource,
-          ...maxResults !== undefined ? { max_results: maxResults } : {},
-        }),
-        ...signal !== undefined ? { signal } : {},
-      })
-    } catch (error) {
-      if (isAbortError(error)) throw new WebError('Tavily search aborted', 'WEB_ABORTED', { cause: error })
-      throw new WebError(`Tavily search request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+    const keys = await resolveKeys(this.options)
+    if (keys.length === 0) {
+      throw new WebError(
+        'Tavily search requires an API key: set TAVILY_API_KEY in the credentials store (or the plugin config apiKey); add TAVILY_API_KEY_2, TAVILY_API_KEY_3, … to rotate several keys',
+        'WEB_PROVIDER_ERROR',
+      )
+    }
+    this.pool.update(keys)
+
+    const candidates = this.pool.candidates()
+    const refusals = []
+    for (let position = 0; position < candidates.length; position += 1) {
+      if (signal?.aborted) throw new WebError('Tavily search aborted', 'WEB_ABORTED')
+      const entry = candidates[position]
+      const outcome = await attemptSearch(this.options, entry.key, request, maxResults, signal)
+
+      if (outcome.kind === 'ok') {
+        this.pool.noteServed(entry.id)
+        return outcome.result
+      }
+      if (outcome.kind === 'aborted') {
+        throw new WebError('Tavily search aborted', 'WEB_ABORTED', { cause: outcome.cause })
+      }
+      if (outcome.kind === 'failed') throw outcome.error
+
+      this.pool.noteRefused(entry.id, outcome)
+      refusals.push({ position: position + 1, ...outcome })
+      this.#log('warn', 'key %s %s (HTTP %d); trying key %d of %d',
+        entry.id, outcome.reason, outcome.status, position + 2, candidates.length)
     }
 
-    if (!response.ok) {
-      const message = await providerErrorMessage(response)
-      throw new WebError(message, 'WEB_PROVIDER_ERROR')
-    }
+    throw new WebError(allKeysRefused(refusals, candidates.length), 'WEB_PROVIDER_ERROR')
+  }
 
-    try {
-      return mapTavilyResponse(await response.json())
-    } catch (error) {
-      if (isAbortError(error)) throw new WebError('Tavily search aborted', 'WEB_ABORTED', { cause: error })
-      throw new WebError(`Tavily returned an unprocessable response body: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+  /**
+   * Emit one diagnostic through the injected logger. Rotation is otherwise
+   * invisible: the model only ever sees the successful result or the final
+   * failure, so this is where an exhausted or revoked key becomes noticeable.
+   */
+  #log(level, format, ...args) {
+    const logger = this.options.logger
+    if (logger === undefined || typeof logger[level] !== 'function') return
+    logger[level](`web-search-tavily: ${format}`, ...args)
+  }
+}
+
+/**
+ * What one Tavily key's attempt means for the rest of the search. Only
+ * key-specific refusals rotate: an exhausted plan quota, a key the API rejects
+ * as unauthorized, and a rate limit all clear by using a different key. Any
+ * other status — a malformed request, a Tavily-side fault — would answer the
+ * same way for every key, so it fails the search instead of multiplying the
+ * delay by the number of keys.
+ *
+ * @param {number} status - the response status code.
+ * @param {string|null} retryAfter - the response's `retry-after` header, if any.
+ * @returns {{ rotate: boolean, reason?: string, cooldownMs?: number, status?: number }}
+ *   the verdict; `rotate: false` means fail the search now.
+ */
+export function classifyTavilyFailure(status, retryAfter) {
+  if (status === HTTP_PLAN_LIMIT) {
+    return { rotate: true, status, reason: 'exhausted its plan quota', cooldownMs: TAVILY_DEFAULT_QUOTA_COOLDOWN_MS }
+  }
+  if (status === 401 || status === 403) {
+    return { rotate: true, status, reason: 'is not authorized', cooldownMs: TAVILY_DEFAULT_AUTH_COOLDOWN_MS }
+  }
+  if (status === 429) {
+    return {
+      rotate: true,
+      status,
+      reason: 'is rate limited',
+      cooldownMs: retryAfterCooldownMs(retryAfter) ?? TAVILY_DEFAULT_RATE_LIMIT_COOLDOWN_MS,
     }
+  }
+  return { rotate: false }
+}
+
+/**
+ * Honor a `retry-after` header as a quarantine length. Tavily documents the
+ * value as a number of seconds; anything else (or a non-positive number) is
+ * ignored so the caller's default applies. The result is clamped so one header
+ * cannot park a key indefinitely.
+ *
+ * @param {string|null} retryAfter - the raw header value.
+ * @returns {number|undefined} milliseconds to park the key, or undefined to fall back.
+ */
+function retryAfterCooldownMs(retryAfter) {
+  if (typeof retryAfter !== 'string') return undefined
+  const seconds = Number.parseInt(retryAfter.trim(), 10)
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined
+  return Math.min(seconds * 1000, TAVILY_MAX_RETRY_AFTER_MS)
+}
+
+/**
+ * Message for the failure that ends a search every configured key refused.
+ * The model reads this, so it names what each key said and keeps the API's own
+ * wording; keys appear as fingerprints, never as values.
+ *
+ * @param {{ position: number, id: string, status: number, reason: string, message: string }[]} refusals
+ *   one entry per attempted key, in attempt order.
+ * @param {number} total - how many keys the pool held for this search.
+ * @returns {string} the failure message.
+ */
+function allKeysRefused(refusals, total) {
+  const scope = total === 1
+    ? 'the only configured API key'
+    : `all ${total} configured API keys`
+  const detail = refusals
+    .map((refusal) => `#${refusal.position} (${refusal.id}) HTTP ${refusal.status}: ${refusal.reason}`)
+    .join('; ')
+  const last = refusals[refusals.length - 1]
+  return `Tavily search failed on ${scope} — ${detail}. Last error: ${last.message}`
+}
+
+/**
+ * Send one search with one key and classify what came back. Never throws: the
+ * caller decides between rotating, failing, and propagating cancellation.
+ *
+ * @param {object} options - the provider's resolved options.
+ * @param {string} apiKey - the key to send.
+ * @param {object} request - the seam `WebSearchRequest`.
+ * @param {number|undefined} maxResults - the resolved result bound.
+ * @param {AbortSignal} [signal] - optional cancellation signal forwarded to fetch.
+ * @returns {Promise<{kind: 'ok', result: object}
+ *   | {kind: 'aborted', cause: unknown}
+ *   | {kind: 'failed', error: WebError}
+ *   | {kind: 'rotate', status: number, reason: string, cooldownMs: number, message: string}>}
+ *   the attempt's outcome.
+ */
+async function attemptSearch(options, apiKey, request, maxResults, signal) {
+  let response
+  try {
+    response = await fetch(`${options.baseURL}/search`, {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'authorization': `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'accept': 'application/json',
+        'user-agent': USER_AGENT,
+      },
+      body: JSON.stringify({
+        query: request.query,
+        search_depth: options.searchDepth,
+        chunks_per_source: options.chunksPerSource,
+        ...maxResults !== undefined ? { max_results: maxResults } : {},
+      }),
+      ...signal !== undefined ? { signal } : {},
+    })
+  } catch (error) {
+    if (isAbortError(error)) return { kind: 'aborted', cause: error }
+    // A transport failure is not key-specific: the next key would fail the same way.
+    return {
+      kind: 'failed',
+      error: new WebError(`Tavily search request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error }),
+    }
+  }
+
+  if (response.ok) {
+    try {
+      return { kind: 'ok', result: mapTavilyResponse(await response.json()) }
+    } catch (error) {
+      if (isAbortError(error)) return { kind: 'aborted', cause: error }
+      return {
+        kind: 'failed',
+        error: new WebError(`Tavily returned an unprocessable response body: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error }),
+      }
+    }
+  }
+
+  let message
+  try {
+    message = await providerErrorMessage(response)
+  } catch (error) {
+    // Only an abort mid-body reaches here; the status alone is otherwise enough.
+    if (isAbortError(error)) return { kind: 'aborted', cause: error }
+    message = `Tavily API error (HTTP ${response.status})`
+  }
+
+  const verdict = classifyTavilyFailure(response.status, response.headers.get('retry-after'))
+  if (!verdict.rotate) {
+    return { kind: 'failed', error: new WebError(message, 'WEB_PROVIDER_ERROR') }
+  }
+  return {
+    kind: 'rotate',
+    status: verdict.status,
+    reason: verdict.reason,
+    cooldownMs: verdict.cooldownMs,
+    message,
   }
 }
 
@@ -196,27 +379,41 @@ function isPositiveInteger(value) {
 }
 
 /**
- * Resolve the API key for one search: a non-empty literal `apiKey` wins, then
- * the lazy `resolveApiKey` source. A search with neither fails loudly (the
- * seam never rejects the provider at registration for a missing key, because
- * the credentials store may not be ready until after plugin init).
+ * Resolve the keys one search may use, in preference order and deduplicated: a
+ * non-empty literal `apiKey` wins, then the lazy `resolveApiKeys` (or the
+ * legacy singular `resolveApiKey`) source. Values are trimmed — a key pasted
+ * into a YAML credentials file commonly carries a trailing newline, which the
+ * API would reject as unauthorized.
  *
  * @param {object} options - the provider's resolved options.
- * @returns {Promise<string>} the key to send.
+ * @returns {Promise<string[]>} the keys to rotate through; empty when none is configured.
  */
-async function resolveKey(options) {
-  if (typeof options.apiKey === 'string' && options.apiKey.length > 0) return options.apiKey
-  let resolved
+async function resolveKeys(options) {
+  const keys = []
+  const add = (value) => {
+    const key = typeof value === 'string' ? value.trim() : ''
+    if (key.length > 0 && !keys.includes(key)) keys.push(key)
+  }
+
+  add(options.apiKey)
+  if (options.resolveApiKeys !== undefined) {
+    let resolved
+    try {
+      resolved = await options.resolveApiKeys()
+    } catch (error) {
+      throw new WebError(`Tavily key resolution failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+    }
+    if (Array.isArray(resolved)) for (const value of resolved) add(value)
+    return keys
+  }
   if (options.resolveApiKey !== undefined) {
+    let resolved
     try {
       resolved = await options.resolveApiKey()
     } catch (error) {
       throw new WebError(`Tavily key resolution failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
     }
+    add(resolved)
   }
-  if (typeof resolved === 'string' && resolved.length > 0) return resolved
-  throw new WebError(
-    'Tavily search requires an API key: set TAVILY_API_KEY in the credentials store (or the plugin config apiKey)',
-    'WEB_PROVIDER_ERROR',
-  )
+  return keys
 }
