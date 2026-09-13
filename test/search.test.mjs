@@ -6,12 +6,14 @@
  *
  * Covers: source/response mapping, provider availability gating, the key-pool
  * rotation and quarantine rules, single-search failover across keys with a
- * scripted fetch, and a live search against the Tavily API (skipped when no key
- * is set). No test framework: every check is a bare `node:assert`.
+ * scripted fetch, the credential scan and diagnostic channel wired by `apply`,
+ * and a live search against the Tavily API (skipped when no key is set). No
+ * test framework: every check is a bare `node:assert`.
  */
 
 import assert from 'node:assert/strict'
 import { TavilyKeyPool, keyFingerprint, tavilyConventionRefs } from '../src/keys.js'
+import { apply } from '../src/index.js'
 import { TavilySearchProvider, classifyTavilyFailure, mapTavilyResult, mapTavilyResponse } from '../src/provider.js'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -329,6 +331,105 @@ const oneSource = (url) => ({ status: 200, body: { results: [{ url, title: 'OK' 
   )
   stub.restore()
   assert.equal(stub.calls.length, 0, 'a pre-aborted signal sends no request')
+}
+
+// ── the credential scan and diagnostic channel that apply() wires ──────────
+
+/**
+ * Mount the plugin the way the loader does, over a fake credentials store.
+ * `exporters` is how many cordis logger exporters the composition registered —
+ * zero is what the shipped web profile mounts, and it is what makes the plugin
+ * fall back to stderr.
+ */
+async function mount({ refs, exporters = 0 }) {
+  const registered = []
+  const logged = []
+  const ctx = {
+    web: { registerSearchProvider: (provider) => registered.push(provider) },
+    get: (name) => name === 'credentials'
+      ? { resolve: async (ref) => refs.has(ref) ? { value: refs.get(ref), source: 'file' } : undefined }
+      : undefined,
+    logger: Object.assign(() => {}, {
+      exporters: new Map(Array.from({ length: exporters }, (_, index) => [index, {}])),
+      warn: (line) => logged.push(line),
+    }),
+  }
+  await apply(ctx, {})
+  return { provider: registered[0], logged }
+}
+
+/** Capture everything written to stderr for the duration of one check. */
+function captureStderr() {
+  const lines = []
+  const previous = process.stderr.write
+  process.stderr.write = (chunk) => { lines.push(String(chunk).trimEnd()); return true }
+  return { lines, restore: () => { process.stderr.write = previous } }
+}
+
+{
+  // The convention scan finds the primary key and the suffixed ones, and the
+  // provider rotates across exactly those.
+  const { provider } = await mount({ refs: new Map([['TAVILY_API_KEY', 'k1'], ['TAVILY_API_KEY_2', 'k2']]) })
+  const stub = scriptFetch([PLAN_LIMIT, oneSource('https://ok.example')])
+  await provider.search({ query: 'scan' })
+  stub.restore()
+  assert.deepEqual(stub.calls.map((call) => call.key), ['k1', 'k2'], 'the scan picks up TAVILY_API_KEY and _2')
+}
+
+{
+  // A gap left by a removed key does not end the scan.
+  const { provider } = await mount({ refs: new Map([['TAVILY_API_KEY', 'k1'], ['TAVILY_API_KEY_3', 'k3']]) })
+  const stub = scriptFetch([PLAN_LIMIT, oneSource('https://ok.example')])
+  await provider.search({ query: 'gap' })
+  stub.restore()
+  assert.deepEqual(stub.calls.map((call) => call.key), ['k1', 'k3'], 'a single missing suffix is skipped, not fatal')
+}
+
+{
+  // Two consecutive missing references do end it, so a high suffix is not probed forever.
+  const { provider } = await mount({ refs: new Map([['TAVILY_API_KEY', 'k1'], ['TAVILY_API_KEY_5', 'k5']]) })
+  const stderr = captureStderr()
+  const stub = scriptFetch([PLAN_LIMIT])
+  let failure
+  try {
+    await provider.search({ query: 'beyond the gap' })
+  } catch (error) {
+    failure = error
+  }
+  stub.restore()
+  stderr.restore()
+  assert.equal(stub.calls.length, 1, 'the scan stops after two consecutive misses')
+  assert.match(failure.message, /the only configured API key/, 'a key beyond the gap is not configured')
+  assert.match(stderr.lines[0], /no key left to try$/, 'the last refusal says there is no next key')
+}
+
+{
+  // With no logger exporter mounted, the rotation diagnostic goes to stderr.
+  const { provider } = await mount({ refs: new Map([['TAVILY_API_KEY', 'k1'], ['TAVILY_API_KEY_2', 'k2']]) })
+  const stderr = captureStderr()
+  const stub = scriptFetch([PLAN_LIMIT, oneSource('https://ok.example')])
+  await provider.search({ query: 'diagnostic' })
+  stub.restore()
+  stderr.restore()
+  assert.equal(stderr.lines.length, 1, 'one rotation writes one diagnostic line')
+  assert.match(stderr.lines[0], /^web-search-tavily: key [0-9a-f]{12} exhausted its plan quota \(HTTP 432\)/, 'the line names the key and the reason')
+  assert.equal(stderr.lines[0].includes('k1'), false, 'the line never leaks a key value')
+}
+
+{
+  // With an exporter listening, the same diagnostic goes to the logger instead.
+  const { provider, logged } = await mount({
+    refs: new Map([['TAVILY_API_KEY', 'k1'], ['TAVILY_API_KEY_2', 'k2']]),
+    exporters: 1,
+  })
+  const stderr = captureStderr()
+  const stub = scriptFetch([PLAN_LIMIT, oneSource('https://ok.example')])
+  await provider.search({ query: 'diagnostic' })
+  stub.restore()
+  stderr.restore()
+  assert.equal(stderr.lines.length, 0, 'a listening logger means no stderr fallback')
+  assert.equal(logged.length, 1, 'the diagnostic reaches the logger')
+  assert.match(logged[0], /exhausted its plan quota \(HTTP 432\)/, 'the logged line is the same diagnostic')
 }
 
 // ── live call ──────────────────────────────────────────────────────────────

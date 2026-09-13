@@ -142,22 +142,33 @@ export class TavilySearchProvider {
 
       this.pool.noteRefused(entry.id, outcome)
       refusals.push({ position: position + 1, id: entry.id, ...outcome })
-      this.#log('warn', 'key %s %s (HTTP %d); trying key %d of %d',
-        entry.id, outcome.reason, outcome.status, position + 2, candidates.length)
+      const next = position + 2
+      this.#log(`key ${entry.id} ${outcome.reason} (HTTP ${outcome.status}); ` +
+        (next <= candidates.length ? `trying key ${next} of ${candidates.length}` : 'no key left to try'))
     }
 
     throw new WebError(allKeysRefused(refusals, candidates.length), 'WEB_PROVIDER_ERROR')
   }
 
   /**
-   * Emit one diagnostic through the injected logger. Rotation is otherwise
-   * invisible: the model only ever sees the successful result or the final
-   * failure, so this is where an exhausted or revoked key becomes noticeable.
+   * Emit one rotation diagnostic. Rotation is otherwise invisible: the model
+   * only ever sees the successful result or the final failure, so this is where
+   * an exhausted or revoked key becomes noticeable to the operator.
+   *
+   * The injected logger is a cordis logger, which drops every message when the
+   * composition mounts no exporter — the shipped `web-plus` profile mounts
+   * none. `apply` therefore injects a logger only when one is actually
+   * listening, and this falls back to stderr, which the service unit captures
+   * in the journal either way.
    */
-  #log(level, format, ...args) {
+  #log(message) {
+    const line = `web-search-tavily: ${message}`
     const logger = this.options.logger
-    if (logger === undefined || typeof logger[level] !== 'function') return
-    logger[level](`web-search-tavily: ${format}`, ...args)
+    if (logger !== undefined && typeof logger.warn === 'function') {
+      logger.warn(line)
+      return
+    }
+    process.stderr.write(`${line}\n`)
   }
 }
 

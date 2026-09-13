@@ -105,9 +105,20 @@ the pool spreads searches across them and steps over the ones that refuse:
   (7bd73976ce13) HTTP 401: is not authorized. Last error: …`. Keys appear only as
   truncated SHA-256 fingerprints.
 
-Every rotation writes one `warn` line through `ctx.logger` (key fingerprint,
-reason, status, and which key of how many is next) — rotation is otherwise
-invisible, since the model only sees the successful result or the final failure.
+Every rotation writes one diagnostic line — key fingerprint, reason, status, and
+either which key is next or that none is left — because rotation is otherwise
+invisible: the model only sees the successful result or the final failure.
+
+That line goes to **stderr** unless the composition mounted a cordis logger
+exporter. The cordis logger drops every message when its exporter registry is
+empty, which is the case in the `dsh` web profile (nothing in the profile mounts
+one), and a dropped line is worse than no line. `apply` therefore inspects
+`ctx.logger.exporters` and injects a logger only when something is listening;
+the service unit captures stderr in the journal either way:
+
+```sh
+journalctl --user-unit=dsh-web.service -n 50 | grep web-search-tavily
+```
 
 Quarantine state lives **in memory only**. A restart re-probes every configured
 key once — at most one rejected request per dead key — which is cheaper than
@@ -143,10 +154,12 @@ TAVILY_API_KEY=... TAVILY_API_KEY_2=... node test/search.test.mjs
 
 The scripted checks replace `globalThis.fetch`, so the failover path (one key
 answering `432`, the next answering `200`, the refused key staying parked on the
-following search) is proven without spending quota. The test resolves
-`@deepseek-ai/dsh-web` from a local `node_modules` symlink to the harness's
-hoisted package; in the profile the same package resolves from the shared
-fallback.
+following search) is proven without spending quota. `apply` is covered the same
+way — mounted over a fake credentials store, it proves the suffix scan, its gap
+tolerance, where it stops, and which channel the rotation diagnostic takes. The
+test resolves `@deepseek-ai/dsh-web` from a local `node_modules` symlink to the
+harness's hoisted package; in the profile the same package resolves from the
+shared fallback.
 
 ## Layout
 
