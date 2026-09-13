@@ -63,6 +63,14 @@ const SEARCH_DEPTHS = new Set(['advanced', 'basic', 'fast', 'ultra-fast'])
 const HTTP_PLAN_LIMIT = 432
 
 /**
+ * Tavily's `433`: the account's pay-as-you-go spending limit is reached. Out of
+ * budget like {@link HTTP_PLAN_LIMIT}, but a cap the account owner set rather
+ * than a monthly allowance, so rotating is right and the daily re-probe only
+ * matters until the cap is raised.
+ */
+const HTTP_PAYGO_LIMIT = 433
+
+/**
  * Resolved provider options (the plugin's `apply` supplies the credentials /
  * config defaults).
  */
@@ -174,11 +182,11 @@ export class TavilySearchProvider {
 
 /**
  * What one Tavily key's attempt means for the rest of the search. Only
- * key-specific refusals rotate: an exhausted plan quota, a key the API rejects
- * as unauthorized, and a rate limit all clear by using a different key. Any
- * other status — a malformed request, a Tavily-side fault — would answer the
- * same way for every key, so it fails the search instead of multiplying the
- * delay by the number of keys.
+ * key-specific refusals rotate: a key that is out of budget (`432` plan quota,
+ * `433` pay-as-you-go cap), a key the API rejects as unauthorized, and a rate
+ * limit all clear by using a different key. Any other status — a malformed
+ * request, a Tavily-side fault — would answer the same way for every key, so it
+ * fails the search instead of multiplying the delay by the number of keys.
  *
  * @param {number} status - the response status code.
  * @param {string|null} retryAfter - the response's `retry-after` header, if any.
@@ -188,6 +196,9 @@ export class TavilySearchProvider {
 export function classifyTavilyFailure(status, retryAfter) {
   if (status === HTTP_PLAN_LIMIT) {
     return { rotate: true, status, reason: 'exhausted its plan quota', cooldownMs: TAVILY_DEFAULT_QUOTA_COOLDOWN_MS }
+  }
+  if (status === HTTP_PAYGO_LIMIT) {
+    return { rotate: true, status, reason: 'exhausted its pay-as-you-go limit', cooldownMs: TAVILY_DEFAULT_QUOTA_COOLDOWN_MS }
   }
   if (status === 401 || status === 403) {
     return { rotate: true, status, reason: 'is not authorized', cooldownMs: TAVILY_DEFAULT_AUTH_COOLDOWN_MS }

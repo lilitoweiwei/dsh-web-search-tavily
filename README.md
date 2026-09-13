@@ -82,13 +82,15 @@ the pool spreads searches across them and steps over the ones that refuse:
   | Status | Meaning | Cooldown before the key is used again |
   | --- | --- | --- |
   | `432` | the plan's usage limit is reached (verified against the live API) | 24 h |
+  | `433` | the account's pay-as-you-go spending limit is reached | 24 h |
   | `401`, `403` | the key is missing, invalid, or revoked | 1 h |
   | `429` | rate limit | the response's `retry-after` seconds, clamped to 5 min, else 60 s |
 
-  A 24 h quota cooldown is deliberate: Tavily resets a free plan monthly and does
-  not report the reset date, so re-probing daily costs at most one rejected
-  request per key per day and picks a key back up within a day of its quota
-  returning.
+  A 24 h quota cooldown is deliberate for `432`: Tavily resets a free plan
+  monthly and does not report the reset date, so re-probing daily costs at most
+  one rejected request per key per day and picks a key back up within a day of
+  its quota returning. The same cooldown covers `433`, where the daily probe only
+  matters until the spending cap is raised.
 - **Other failures do not rotate.** A malformed request (`400`), a Tavily-side
   fault (`5xx`), or a transport failure would answer the same way for every key,
   so the search fails on the first response instead of multiplying the delay by

@@ -55,6 +55,8 @@ assert.deepEqual(mapTavilyResponse({}), { sources: [], truncated: false })
 // ── failure classification (the rotation rule) ─────────────────────────────
 
 assert.equal(classifyTavilyFailure(432, null).rotate, true, 'an exhausted plan quota rotates')
+assert.equal(classifyTavilyFailure(433, null).rotate, true, 'an exhausted pay-as-you-go limit rotates')
+assert.equal(classifyTavilyFailure(433, null).cooldownMs, 24 * 60 * 60 * 1000, 'both budget codes park for a day')
 assert.equal(classifyTavilyFailure(401, null).rotate, true, 'an unauthorized key rotates')
 assert.equal(classifyTavilyFailure(403, null).rotate, true, 'a forbidden key rotates')
 assert.equal(classifyTavilyFailure(429, null).rotate, true, 'a rate limit rotates')
@@ -179,6 +181,7 @@ function scriptFetch(routes) {
 }
 
 const PLAN_LIMIT = { status: 432, body: { detail: { error: "This request exceeds your plan's set usage limit." } } }
+const PAYGO_LIMIT = { status: 433, body: { detail: { error: 'This request exceeds your pay-as-you-go limit.' } } }
 const UNAUTHORIZED = { status: 401, body: { detail: { error: 'Unauthorized: missing or invalid API key.' } } }
 const oneSource = (url) => ({ status: 200, body: { results: [{ url, title: 'OK' }] } })
 
@@ -201,6 +204,16 @@ const oneSource = (url) => ({ status: 200, body: { results: [{ url, title: 'OK' 
   await provider.search({ query: 'after failover' })
   second.restore()
   assert.deepEqual(second.calls.map((call) => call.key), ['tvly-live'], 'a parked key is skipped on the next search')
+}
+
+{
+  // A key out of pay-as-you-go budget hands over just like an exhausted plan.
+  const provider = new TavilySearchProvider({ resolveApiKeys: async () => ['tvly-capped', 'tvly-live'] })
+  const stub = scriptFetch([PAYGO_LIMIT, oneSource('https://ok.example')])
+  await provider.search({ query: 'paygo' })
+  stub.restore()
+  assert.deepEqual(stub.calls.map((call) => call.key), ['tvly-capped', 'tvly-live'], 'HTTP 433 rotates too')
+  assert.equal(provider.pool.describe()[0].reason, 'exhausted its pay-as-you-go limit', 'the park names the PAYGO cap')
 }
 
 {
