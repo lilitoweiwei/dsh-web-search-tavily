@@ -81,10 +81,6 @@ export async function apply(ctx, config) {
     // added, or removed key must reach the next search without a restart.
     ...literalApiKey === undefined ? {} : { apiKey: literalApiKey },
     resolveApiKeys: async () => resolveCredentialsKeys(ctx, maxKeyRefs),
-    // Rotation diagnostics: a cordis logger drops every message unless the
-    // composition mounted an exporter, so the provider is given one only when
-    // something is listening and otherwise falls back to stderr.
-    ...loggerIsListening(ctx) ? { logger: { warn: (line) => ctx.logger.warn(line) } } : {},
     baseURL: config?.baseURL ?? TAVILY_DEFAULT_BASE_URL,
     searchDepth: config?.searchDepth ?? TAVILY_DEFAULT_SEARCH_DEPTH,
     chunksPerSource: config?.chunksPerSource ?? TAVILY_DEFAULT_CHUNKS_PER_SOURCE,
@@ -114,7 +110,7 @@ async function resolveCredentialsKeys(ctx, maxKeyRefs) {
       try {
         hit = await credentials.resolve(ref)
       } catch (error) {
-        diagnose(ctx, `credential resolution failed for ${ref} ` +
+        diagnose(`credential resolution failed for ${ref} ` +
           `(${error instanceof Error ? error.message : String(error)}); using the keys found so far`)
         break
       }
@@ -134,31 +130,15 @@ async function resolveCredentialsKeys(ctx, maxKeyRefs) {
 }
 
 /**
- * Whether a diagnostic written to the cordis logger would reach anyone. The
- * logger keeps an exporter registry, and with it empty every message is dropped
- * without a trace — which is the case in the shipped `web-plus` profile, since
- * it mounts no logger plugin.
+ * Write one diagnostic line to stderr, where the operator actually sees it:
+ * the service unit captures stderr in the journal. Not `ctx.logger`, because
+ * cordis's always-present built-in exporter only buffers messages in memory and
+ * the `dsh` web profile mounts no console sink on top of it.
  *
- * @param {object} ctx - the plugin context owning `ctx.logger`.
- * @returns {boolean} true when at least one exporter is registered.
- */
-function loggerIsListening(ctx) {
-  const logger = ctx.logger
-  return logger !== undefined && logger.exporters instanceof Map && logger.exporters.size > 0
-}
-
-/**
- * Write one diagnostic line where the operator can actually see it: the cordis
- * logger when an exporter is listening, otherwise stderr, which the service
- * unit captures in the journal.
- *
- * @param {object} ctx - the plugin context owning `ctx.logger`.
  * @param {string} message - the diagnostic, without the plugin prefix.
  */
-function diagnose(ctx, message) {
-  const line = `web-search-tavily: ${message}`
-  if (loggerIsListening(ctx)) ctx.logger.warn(line)
-  else process.stderr.write(`${line}\n`)
+function diagnose(message) {
+  process.stderr.write(`web-search-tavily: ${message}\n`)
 }
 
 /** `TAVILY_API_KEY` from the process environment, or `undefined` when unset/blank. */

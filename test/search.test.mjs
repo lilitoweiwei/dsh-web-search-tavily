@@ -349,12 +349,11 @@ const oneSource = (url) => ({ status: 200, body: { results: [{ url, title: 'OK' 
 // ── the credential scan and diagnostic channel that apply() wires ──────────
 
 /**
- * Mount the plugin the way the loader does, over a fake credentials store.
- * `exporters` is how many cordis logger exporters the composition registered —
- * zero is what the shipped web profile mounts, and it is what makes the plugin
- * fall back to stderr.
+ * Mount the plugin the way the loader does, over a fake credentials store. The
+ * fake context carries a logger whose `warn` records calls, so a check can
+ * prove the diagnostic does *not* go through the cordis logger.
  */
-async function mount({ refs, exporters = 0 }) {
+async function mount({ refs }) {
   const registered = []
   const logged = []
   const ctx = {
@@ -362,10 +361,7 @@ async function mount({ refs, exporters = 0 }) {
     get: (name) => name === 'credentials'
       ? { resolve: async (ref) => refs.has(ref) ? { value: refs.get(ref), source: 'file' } : undefined }
       : undefined,
-    logger: Object.assign(() => {}, {
-      exporters: new Map(Array.from({ length: exporters }, (_, index) => [index, {}])),
-      warn: (line) => logged.push(line),
-    }),
+    logger: Object.assign(() => {}, { warn: (line) => logged.push(line) }),
   }
   await apply(ctx, {})
   return { provider: registered[0], logged }
@@ -430,19 +426,16 @@ function captureStderr() {
 }
 
 {
-  // With an exporter listening, the same diagnostic goes to the logger instead.
-  const { provider, logged } = await mount({
-    refs: new Map([['TAVILY_API_KEY', 'k1'], ['TAVILY_API_KEY_2', 'k2']]),
-    exporters: 1,
-  })
+  // The diagnostic never goes through the cordis logger, which only buffers:
+  // stderr is the operator's only channel in the shipped composition.
+  const { provider, logged } = await mount({ refs: new Map([['TAVILY_API_KEY', 'k1'], ['TAVILY_API_KEY_2', 'k2']]) })
   const stderr = captureStderr()
   const stub = scriptFetch([PLAN_LIMIT, oneSource('https://ok.example')])
   await provider.search({ query: 'diagnostic' })
   stub.restore()
   stderr.restore()
-  assert.equal(stderr.lines.length, 0, 'a listening logger means no stderr fallback')
-  assert.equal(logged.length, 1, 'the diagnostic reaches the logger')
-  assert.match(logged[0], /exhausted its plan quota \(HTTP 432\)/, 'the logged line is the same diagnostic')
+  assert.equal(logged.length, 0, 'the cordis logger is never used')
+  assert.equal(stderr.lines.length, 1, 'the diagnostic goes to stderr instead')
 }
 
 // ── live call ──────────────────────────────────────────────────────────────

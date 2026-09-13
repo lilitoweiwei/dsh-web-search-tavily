@@ -111,16 +111,17 @@ Every rotation writes one diagnostic line — key fingerprint, reason, status, a
 either which key is next or that none is left — because rotation is otherwise
 invisible: the model only sees the successful result or the final failure.
 
-That line goes to **stderr** unless the composition mounted a cordis logger
-exporter. The cordis logger drops every message when its exporter registry is
-empty, which is the case in the `dsh` web profile (nothing in the profile mounts
-one), and a dropped line is worse than no line. `apply` therefore inspects
-`ctx.logger.exporters` and injects a logger only when something is listening;
-the service unit captures stderr in the journal either way:
+That line goes to **stderr**, which the service unit captures in the journal:
 
 ```sh
 journalctl --user-unit=dsh-web.service -n 50 | grep web-search-tavily
 ```
+
+Deliberately not `ctx.logger`: cordis always registers one built-in exporter that
+only pushes messages into a 1000-entry in-memory ring buffer, so `ctx.logger`
+reaches no operator unless the composition additionally mounts a console sink —
+and the `dsh` web profile mounts none. A line that reaches nobody is worse than no
+line, and the harness's own CLI uses stderr for the same class of operator notice.
 
 Quarantine state lives **in memory only**. A restart re-probes every configured
 key once — at most one rejected request per dead key — which is cheaper than

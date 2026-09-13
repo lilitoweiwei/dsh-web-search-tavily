@@ -159,24 +159,19 @@ export class TavilySearchProvider {
   }
 
   /**
-   * Emit one rotation diagnostic. Rotation is otherwise invisible: the model
-   * only ever sees the successful result or the final failure, so this is where
-   * an exhausted or revoked key becomes noticeable to the operator.
+   * Emit one rotation diagnostic to stderr. Rotation is otherwise invisible:
+   * the model only ever sees the successful result or the final failure, so
+   * this is where an exhausted or revoked key becomes noticeable to the
+   * operator, and the service unit captures stderr in the journal.
    *
-   * The injected logger is a cordis logger, which drops every message when the
-   * composition mounts no exporter — the shipped `web-plus` profile mounts
-   * none. `apply` therefore injects a logger only when one is actually
-   * listening, and this falls back to stderr, which the service unit captures
-   * in the journal either way.
+   * Not `ctx.logger`: cordis always registers one built-in exporter that only
+   * pushes messages into a 1000-entry in-memory ring buffer, so a logger
+   * message reaches no operator unless the composition additionally mounts a
+   * console sink — the `dsh` web profile does not. stderr is also what the
+   * harness's own CLI uses for operator notices it cannot route to a logger.
    */
   #log(message) {
-    const line = `web-search-tavily: ${message}`
-    const logger = this.options.logger
-    if (logger !== undefined && typeof logger.warn === 'function') {
-      logger.warn(line)
-      return
-    }
-    process.stderr.write(`${line}\n`)
+    process.stderr.write(`web-search-tavily: ${message}\n`)
   }
 }
 
