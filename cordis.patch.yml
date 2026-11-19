@@ -1,0 +1,25 @@
+# dsh-web-search-tavily bundle layer.
+#
+# Two rows, one decision: mount this provider on the web seam, and pin the seam
+# to it. Splitting them across layers would let the provider load while the seam
+# still asked for another one.
+#
+# `searchDepth: basic` = 1 credit per request and lower latency. The plugin
+# defaults to `advanced` (2 credits); a free plan's quota runs out quickly at
+# that rate. The plugin never sends `auto_parameters`, so Tavily cannot raise a
+# pinned `basic` back to `advanced`.
+#
+# The `web` row belongs to `@deepseek-ai/dsh-base`; this layer replaces its whole
+# config, so `fetchProvider` is restated (a patch does not deep-merge). Both
+# keys must hold the values they would otherwise inherit — see that row for the
+# inherited defaults.
+- insert:
+    - id: web-search-tavily
+      name: '@lilitoweiwei/dsh-web-search-tavily'
+      config:
+        searchDepth: basic
+
+- id: web
+  config:
+    searchProvider: tavily
+    fetchProvider: http
