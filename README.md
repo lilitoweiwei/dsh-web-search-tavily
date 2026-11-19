@@ -60,7 +60,7 @@ Order of precedence:
 3. **`TAVILY_API_KEY` environment variable** — last-resort ambient fallback,
    used only when the store yields no key at all.
 
-Recommended placement for real keys is `~/.dsh/.credentials.yaml` (owner-only
+Recommended placement for real keys is `$DSH_HOME/.credentials.yaml` (owner-only
 file; keys never enter a `cordis.yml` or Git):
 
 ```yaml
