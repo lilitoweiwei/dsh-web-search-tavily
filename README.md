@@ -32,6 +32,12 @@ Only `url` is guaranteed; blank optional fields are omitted rather than invented
 `tavily`. After mounting, pin the seam with `searchProvider: tavily` (or let it
 auto-select when it is the only usable provider).
 
+The package is also a bundle: [cordis.patch.yml](cordis.patch.yml) mounts the
+provider **and** pins the `web` seam to it in the same layer, so selecting the
+bundle is one decision instead of two. Selecting it never pins a second copy —
+`fetchProvider` is restated there because a patch replaces that row's whole
+config.
+
 ## Key resolution
 
 Resolved **lazily, per search** — never at plugin load. The loader inits plugin
@@ -171,6 +177,7 @@ src/index.js       function plugin: name/inject/apply, credential scan, key wiri
 src/provider.js    TavilySearchProvider: id/available/search, rotation loop, mapping
 src/keys.js        key convention, fingerprints, round-robin order, quarantine
 src/invariant.js   DSH invariant companion (no-op)
+cordis.patch.yml   bundle layer: the provider row + the `web` pin
 test/search.test.mjs  standalone proof
 package.json       @lilitoweiwei/dsh-web-search-tavily
 ```
